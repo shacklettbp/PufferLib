@@ -926,7 +926,7 @@ def rollout(env_creator, env_kwargs, policy_cls, rnn_cls, agent_creator, agent_k
     intrinsic = [0]
     intrinsic_mean = None
     intrinsic_std = None
-    while tick <= 200000:
+    while tick <= 2000:
         if tick % 1 == 0:
             #render = driver.render(overlay=float(intrinsic[0]))
             render = driver.render()

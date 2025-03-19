@@ -4,14 +4,14 @@ from torch import nn
 import pufferlib.models
 import numpy as np
 
-NUM_POSITION_FREQUENCES = 16
+NUM_POSITION_FREQUENCIES = 16
 
 class MadronaFPSLSTM(pufferlib.models.LSTMWrapper):
-    def __init__(self, env, policy, input_size=256, hidden_size=256):
+    def __init__(self, env, policy, input_size=512, hidden_size=512):
         super().__init__(env, policy, input_size, hidden_size)
 
 class Policy(nn.Module):
-    def __init__(self, env, num_embed_channels=64, hidden_size=256, **kwargs):
+    def __init__(self, env, num_embed_channels=64, hidden_size=512, **kwargs):
         super().__init__()
 
         self.obs_unpack_info = env.obs_unpack_info
@@ -22,10 +22,12 @@ class Policy(nn.Module):
         self.num_agents_per_env = env.num_agents_per_env
         self.team_size = env.team_size
 
+        num_self_in_channels = fake_obs['self_obs'].shape[-1] + NUM_POSITION_FREQUENCIES * 3
+
         self.self_encode = nn.Sequential(
             pufferlib.pytorch.layer_init(
-                nn.Linear(fake_obs['self_obs'].shape[-1], num_embed_channels)),
-            #nn.LayerNorm(),
+                nn.Linear(num_self_in_channels, num_embed_channels)),
+            nn.LayerNorm(num_embed_channels),
             nn.ReLU(),
         )
 
@@ -45,10 +47,10 @@ class Policy(nn.Module):
                         out_channels=num_conv_channels,
                         kernel_size=3, stride=2, padding=1)),
                 nn.Flatten(),
-                #nn.LayerNorm(num_conv_flattened),
+                nn.LayerNorm(num_conv_flattened),
                 nn.ReLU(),
                 nn.Linear(num_conv_flattened, num_embed_channels),
-                #nn.LayerNorm(num_conv_flattened),
+                nn.LayerNorm(num_embed_channels),
                 nn.ReLU(),
             )
 
@@ -59,36 +61,36 @@ class Policy(nn.Module):
         self.teammates_encode = nn.Sequential(
             pufferlib.pytorch.layer_init(
                 nn.Linear(fake_obs['teammates'].shape[-1], num_embed_channels)),
-            #nn.LayerNorm(),
+            nn.LayerNorm(num_embed_channels),
             nn.ReLU(),
         )
 
         self.opponents_encode = nn.Sequential(
             pufferlib.pytorch.layer_init(
                 nn.Linear(fake_obs['opponents'].shape[-1], num_embed_channels)),
-            #nn.LayerNorm(),
+            nn.LayerNorm(num_embed_channels),
             nn.ReLU(),
         )
 
         self.opponents_last_known_encode = nn.Sequential(
             pufferlib.pytorch.layer_init(
                 nn.Linear(fake_obs['opponents_last_known'].shape[-1], num_embed_channels)),
-            #nn.LayerNorm(),
+            nn.LayerNorm(num_embed_channels),
             nn.ReLU(),
         )
 
         self.mlp = nn.Sequential(
             pufferlib.pytorch.layer_init(
                 nn.Linear(num_embed_channels * 6, hidden_size)),
-            #nn.LayerNorm(),
+            nn.LayerNorm(hidden_size),
             nn.ReLU(),
             pufferlib.pytorch.layer_init(
                 nn.Linear(hidden_size, hidden_size)),
-            #nn.LayerNorm(),
+            nn.LayerNorm(hidden_size),
             nn.ReLU(),
             pufferlib.pytorch.layer_init(
                 nn.Linear(hidden_size, hidden_size)),
-            #nn.LayerNorm(),
+            nn.LayerNorm(hidden_size),
             nn.ReLU()
         )
 
@@ -122,7 +124,30 @@ class Policy(nn.Module):
     def encode_observations(self, flattened_obs):
         obs = self._unpack_obs(flattened_obs)
 
-        self_features = self.self_encode(obs['self_obs'])
+        def vaswani_positional_embedding(embed_size, pos):
+            embedding = torch.empty(*pos.shape[:-1], embed_size, pos.shape[-1], 
+                                    device=pos.device)
+            
+            for i in range(embed_size // 2):
+                # Compute the scaled position: pos * (2^i) * pi
+                v = pos * (2.0 ** i) * torch.pi
+                sin_embedding = torch.sin(v)
+                cos_embedding = torch.cos(v)
+                
+                embedding[..., 2 * i, :] = sin_embedding
+                embedding[..., 2 * i + 1, :] = cos_embedding
+            
+            # Reshape to flatten the last two dimensions
+            embedding = embedding.view(*pos.shape[:-1], -1)
+            return embedding
+
+        self_pos_enc = vaswani_positional_embedding(
+            NUM_POSITION_FREQUENCIES, obs['self_pos'])
+
+        self_features = self.self_encode(torch.cat([
+                self_pos_enc,
+                obs['self_obs'],
+            ], dim=-1))
         
         fwd_lidar_reshaped = obs['fwd_lidar'].transpose(-1, -2)
         fwd_lidar_reshaped = fwd_lidar_reshaped.reshape(
