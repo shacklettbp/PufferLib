@@ -101,7 +101,6 @@ def create(config, vecenv, policy, optimizer=None, wandb=None, neptune=None):
     total_agents = vecenv.num_agents
 
     lstm = policy.recurrent if hasattr(policy, 'recurrent') else None
-    policy.hidden_size = 128
     experience = Experience(config.batch_size, config.bptt_horizon,
         config.minibatch_size, policy.hidden_size, obs_shape, obs_dtype,
         atn_shape, atn_dtype, config.cpu_offload, config.device, lstm, total_agents,

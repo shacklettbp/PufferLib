@@ -1,3 +1,5 @@
+import madrona_mp_env
+
 import configparser
 import argparse
 import shutil
