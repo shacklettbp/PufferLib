@@ -1,4 +1,6 @@
 import functools
+from dataclasses import dataclass
+from typing import Tuple
 
 import pufferlib
 import pufferlib.emulation
@@ -6,13 +8,20 @@ import gymnasium
 import numpy as np
 import torch
 
+@dataclass
+class MadronaObservationUnpackInfo:
+    orig_shape: Tuple[int]
+    flattened_offset: int
+    num_flattened_channels: int
+
+
 class MadronaFPSPufferEnv(pufferlib.environment.PufferEnv):
     def __init__(self, sim, team_size, num_envs=1, buf=None):
         train_iface = sim.train_interface()
         print(train_iface)
 
         obs = {}
-        #obs['self_pos'] = sim.self_pos().to_torch()
+        obs['self_pos'] = sim.self_pos().to_torch()
         obs['self_obs'] = sim.self_obs().to_torch()
         obs['fwd_lidar'] = sim.fwd_lidar().to_torch()
         obs['rear_lidar'] = sim.rear_lidar().to_torch()
@@ -22,12 +31,22 @@ class MadronaFPSPufferEnv(pufferlib.environment.PufferEnv):
         obs['opponents_last_known'] = sim.opponents_last_known().to_torch()
         obs['opponent_masks'] = sim.opponent_masks().to_torch()
 
-        self.flattened_obs_size = 0
+        self.total_flattened_obs_size = 0
+        self.obs_unpack_info = {}
         for k, v in obs.items():
-            self.flattened_obs_size += np.product(v.shape[1:])
+            orig_shape = v.shape[1:]
+            num_flattened = np.product(orig_shape)
+
+            self.obs_unpack_info[k] = MadronaObservationUnpackInfo(
+                orig_shape = orig_shape,
+                flattened_offset = self.total_flattened_obs_size,
+                num_flattened_channels = num_flattened,
+            )
+
+            self.total_flattened_obs_size += num_flattened
 
         self.single_observation_space = gymnasium.spaces.Box(low=0, high=0,
-            shape=(self.flattened_obs_size,), dtype=np.float32)
+            shape=(self.total_flattened_obs_size,), dtype=np.float32)
 
         self.single_action_space = gymnasium.spaces.MultiDiscrete(
             [3, 8, 3, 3, 13, 7])
@@ -54,33 +73,34 @@ class MadronaFPSPufferEnv(pufferlib.environment.PufferEnv):
 
         self.foo = 0
 
+        def flatten_obs_helper(obs):
+            out = torch.zeros(self.num_agents, self.total_flattened_obs_size,
+                              dtype=torch.float32)
 
-    def _get_obs(self):
-        out = torch.zeros((self.num_agents, self.flattened_obs_size),
-                          dtype=torch.float32)
+            cur_offset = 0
+            for k, v in obs.items():
+                flattened_v = v.view(self.num_agents, -1)
 
-        cur_offset = 0
-        for k, v in self.obs.items():
-            flattened_v = v.view(self.num_agents, -1)
+                end_offset = cur_offset+flattened_v.shape[-1]
+                out[:, cur_offset:end_offset] = flattened_v.float()
+                cur_offset = end_offset
 
-            end_offset = cur_offset+flattened_v.shape[-1]
-            out[:, cur_offset:end_offset] = flattened_v.float()
-            cur_offset = end_offset
+            return out
 
-        return out
+        self._flatten_obs = torch.jit.trace(
+            flatten_obs_helper, example_inputs=[self.obs])
 
     def reset(self, params=None):
         self.sim_resets[:] = 1
-        #self.env.step()
+        self.env.step()
         self.sim_resets[:] = 0
 
-        obs = self._get_obs()
-        self.observations = obs
+        self.observations = self._flatten_obs(self.obs)
         infos = []
 
         self.terminals = self.sim_terminals[:, 0]
         
-        return obs, infos
+        return self.observations, infos
 
     def render(self):
         pass
@@ -97,19 +117,15 @@ class MadronaFPSPufferEnv(pufferlib.environment.PufferEnv):
         self.sim_discrete_actions[:] = pvp_actions
         self.sim_aim_actions[:] = aim_actions
 
-        #self.env.step()
+        self.env.step()
 
-        obs = self._get_obs()
-        self.observations = obs
-
-        self.foo += 1
-
-        infos = [{'foo': self.foo}]
-
+        self.observations = self._flatten_obs(self.obs)
         self.rewards = self.sim_rewards[:, 0]
         self.terminals = self.sim_terminals[:, 0]
 
-        return obs, self.rewards, self.terminals, self.truncations, infos
+        infos = []
+
+        return self.observations, self.rewards, self.terminals, self.truncations, infos
 
 
 def env_creator(name='Madrona-FPS'):

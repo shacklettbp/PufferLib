@@ -14,56 +14,72 @@ class Policy(nn.Module):
     def __init__(self, env, num_embed_channels=64, hidden_size=256, **kwargs):
         super().__init__()
 
-        self.num_self_features = (
-            env.obs['self_obs'].shape[-1] +
-            np.product(env.obs['fwd_lidar'].shape[1:]) +
-            np.product(env.obs['rear_lidar'].shape[1:]) +
-            env.obs['reward_coefs'].shape[-1]
-        )
+        self.obs_unpack_info = env.obs_unpack_info
 
-        self.num_teammate_features = env.obs['teammates'].shape[-1]
-        self.num_opponent_features = env.obs['opponents'].shape[-1]
-        self.num_opponent_last_known_features = env.obs['opponents_last_known'].shape[-1]
-
-        self.num_features = { k: v.shape[1:] for k, v in env.obs.items() }
+        fake_obs = self._unpack_obs(
+            torch.zeros((1, env.total_flattened_obs_size), dtype=torch.float32))
 
         self.num_agents_per_env = env.num_agents_per_env
         self.team_size = env.team_size
 
         self.self_encode = nn.Sequential(
             pufferlib.pytorch.layer_init(
-                nn.Linear(
-                    self.num_self_features, num_embed_channels)),
+                nn.Linear(fake_obs['self_obs'].shape[-1], num_embed_channels)),
             #nn.LayerNorm(),
             nn.ReLU(),
         )
 
+        def build_lidar_encoder(lidar_ob, num_conv_channels=8):
+            num_conv_flattened = num_conv_channels * (lidar_ob.shape[-2] // 4)
+
+            return nn.Sequential(
+                pufferlib.pytorch.layer_init(
+                    nn.Conv1d(
+                        in_channels=lidar_ob.shape[-1] * lidar_ob.shape[-3],
+                        out_channels=num_conv_channels,
+                        kernel_size=3, stride=2, padding=1)),
+                nn.ReLU(),
+                pufferlib.pytorch.layer_init(
+                    nn.Conv1d(
+                        in_channels=num_conv_channels,
+                        out_channels=num_conv_channels,
+                        kernel_size=3, stride=2, padding=1)),
+                nn.Flatten(),
+                #nn.LayerNorm(num_conv_flattened),
+                nn.ReLU(),
+                nn.Linear(num_conv_flattened, num_embed_channels),
+                #nn.LayerNorm(num_conv_flattened),
+                nn.ReLU(),
+            )
+
+
+        self.fwd_lidar_encode = build_lidar_encoder(fake_obs['fwd_lidar'])
+        self.rear_lidar_encode = build_lidar_encoder(fake_obs['rear_lidar'])
+
         self.teammates_encode = nn.Sequential(
             pufferlib.pytorch.layer_init(
-                nn.Linear(self.num_teammate_features, num_embed_channels)),
+                nn.Linear(fake_obs['teammates'].shape[-1], num_embed_channels)),
             #nn.LayerNorm(),
             nn.ReLU(),
         )
 
         self.opponents_encode = nn.Sequential(
             pufferlib.pytorch.layer_init(
-                nn.Linear(self.num_opponent_features, num_embed_channels)),
+                nn.Linear(fake_obs['opponents'].shape[-1], num_embed_channels)),
             #nn.LayerNorm(),
             nn.ReLU(),
         )
 
         self.opponents_last_known_encode = nn.Sequential(
             pufferlib.pytorch.layer_init(
-                nn.Linear(self.num_opponent_last_known_features,
-                          num_embed_channels)),
+                nn.Linear(fake_obs['opponents_last_known'].shape[-1], num_embed_channels)),
             #nn.LayerNorm(),
             nn.ReLU(),
         )
 
         self.mlp = nn.Sequential(
             pufferlib.pytorch.layer_init(
-                nn.Linear(num_embed_channels * 4,
-                          hidden_size)),
+                nn.Linear(num_embed_channels * 6, hidden_size)),
             #nn.LayerNorm(),
             nn.ReLU(),
             pufferlib.pytorch.layer_init(
@@ -88,48 +104,51 @@ class Policy(nn.Module):
         self.is_continuous = False
         self.hidden_size = hidden_size
 
+    def _unpack_obs(self, flattened):
+        unpacked = {}
+        for k, unpack_info in self.obs_unpack_info.items():
+            sliced = flattened[:, unpack_info.flattened_offset:unpack_info.flattened_offset + unpack_info.num_flattened_channels]
+
+            unpacked[k] = sliced.view(sliced.shape[0], *unpack_info.orig_shape)
+
+        return unpacked
+
 
     def forward(self, observations):
         hidden, lookup = self.encode_observations(observations)
         actions, value = self.decode_actions(hidden, lookup)
         return actions, value
 
-    def encode_observations(self, observations):
-        self_ob = observations[:, 0:self.num_self_features]
+    def encode_observations(self, flattened_obs):
+        obs = self._unpack_obs(flattened_obs)
 
-        num_teammates = self.team_size - 1
+        self_features = self.self_encode(obs['self_obs'])
+        
+        fwd_lidar_reshaped = obs['fwd_lidar'].transpose(-1, -2)
+        fwd_lidar_reshaped = fwd_lidar_reshaped.reshape(
+            fwd_lidar_reshaped.shape[0], -1, fwd_lidar_reshaped.shape[-1])
+        fwd_lidar_features = self.fwd_lidar_encode(fwd_lidar_reshaped)
 
-        teammate_ob_start = self.num_self_features
-        teammate_ob_end = teammate_ob_start + self.num_teammate_features * num_teammates
-        teammate_ob = observations[:, teammate_ob_start:teammate_ob_end]
-        teammate_ob = teammate_ob.view(
-            teammate_ob.shape[0], num_teammates, self.num_teammate_features)
+        rear_lidar_reshaped = obs['rear_lidar'].transpose(-1, -2)
+        rear_lidar_reshaped = rear_lidar_reshaped.reshape(
+            rear_lidar_reshaped.shape[0], -1, rear_lidar_reshaped.shape[-1])
+        rear_lidar_features = self.rear_lidar_encode(rear_lidar_reshaped)
 
-        opponent_ob_start = teammate_ob_end
-        opponent_ob_end = opponent_ob_start + self.num_opponent_features * self.team_size
-        opponent_ob = observations[:, opponent_ob_start:opponent_ob_end]
-        opponent_ob = opponent_ob.view(
-            opponent_ob.shape[0], self.team_size, self.num_opponent_features)
 
-        opponent_last_known_ob_start = opponent_ob_end
-        opponent_last_known_ob_end = opponent_last_known_ob_start + self.num_opponent_last_known_features * self.team_size
-        opponent_last_known_ob = observations[:, opponent_last_known_ob_start:opponent_last_known_ob_end]
-        opponent_last_known_ob = opponent_last_known_ob.view(
-            opponent_last_known_ob.shape[0], self.team_size, self.num_opponent_last_known_features)
+        teammates_features = self.teammates_encode(obs['teammates'])
+        opponents_features = self.opponents_encode(obs['opponents'])
+        opponents_features = opponents_features * obs['opponent_masks']
 
-        self_features = self.self_encode(self_ob)
-
-        teammates_features = self.teammates_encode(teammate_ob)
-        opponents_features = self.opponents_encode(opponent_ob)
         opponents_last_known_features = self.opponents_last_known_encode(
-            opponent_last_known_ob)
+            obs['opponents_last_known'])
 
         teammates_features, _ = torch.max(teammates_features, dim=1)
         opponents_features, _ = torch.max(opponents_features, dim=1)
         opponents_last_known_features, _ = torch.max(opponents_last_known_features, dim=1)
 
         features = torch.cat(
-            (self_features, teammates_features, opponents_features,
+            (self_features, fwd_lidar_features, rear_lidar_features,
+             teammates_features, opponents_features,
              opponents_last_known_features), dim=-1)
 
         return self.mlp(features), None
