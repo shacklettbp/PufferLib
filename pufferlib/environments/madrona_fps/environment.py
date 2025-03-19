@@ -71,7 +71,7 @@ class MadronaFPSPufferEnv(pufferlib.environment.PufferEnv):
 
     def reset(self, params=None):
         self.sim_resets[:] = 1
-        self.env.step()
+        #self.env.step()
         self.sim_resets[:] = 0
 
         obs = self._get_obs()
@@ -90,13 +90,14 @@ class MadronaFPSPufferEnv(pufferlib.environment.PufferEnv):
 
     def step(self, action):
         gpu_action = torch.tensor(action)
+
         pvp_actions = gpu_action[:, :4]
         aim_actions = gpu_action[:, 4:]
 
         self.sim_discrete_actions[:] = pvp_actions
         self.sim_aim_actions[:] = aim_actions
 
-        self.env.step()
+        #self.env.step()
 
         obs = self._get_obs()
         self.observations = obs
@@ -115,7 +116,7 @@ def env_creator(name='Madrona-FPS'):
     return functools.partial(make, name)
 
 
-def make(name, scene_path, num_envs=2048, buf=None, gpu_id=0):
+def make(name, scene_path, record_path=None, num_envs=2048, buf=None, gpu_id=0):
     import madrona_mp_env
     from madrona_mp_env import Task, SimFlags
 
