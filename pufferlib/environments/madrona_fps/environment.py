@@ -156,6 +156,7 @@ def make(name, scene_path, record_path=None, num_envs=2048, buf=None, gpu_id=0):
         policy_history_size = 0,
         scene_path = scene_path,
         curriculum_data_path = None,
+        record_log_path = record_path,
     )
     sim.init()
 
